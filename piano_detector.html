@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Piano detector</title>
+<style>
+:root{color-scheme:dark;--bg:#101522;--panel:#1a2436;--line:#9eacc2;--accent:#75e0c1;--muted:#aab7ca}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#101522,#18243a);color:#f4f7fb;font:16px system-ui,sans-serif;padding:22px}
+main{max-width:980px;margin:auto}h1{margin:0 0 6px;font-size:clamp(1.7rem,4vw,2.5rem)}p{color:var(--muted);line-height:1.5}
+.panel{background:var(--panel);border:1px solid #34435c;border-radius:18px;padding:18px;margin:16px 0;box-shadow:0 12px 32px #0003}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{border:0;border-radius:12px;padding:12px 17px;font-weight:700;font-size:15px;cursor:pointer;background:var(--accent);color:#10201d}
+button.secondary{background:#35445d;color:#fff}button:disabled{opacity:.45;cursor:not-allowed}
+.status{font-size:14px;color:var(--muted);margin-top:10px}.live{color:var(--accent);font-weight:700}
+.piano{height:140px;display:flex;justify-content:center;position:relative;max-width:740px;margin:18px auto 5px}
+.white{height:132px;flex:1;max-width:72px;background:#f4f1e9;border:1px solid #aab1bd;border-radius:0 0 7px 7px;position:relative;color:#283247}
+.white span{position:absolute;bottom:7px;left:0;right:0;text-align:center;font-size:11px}
+.black{position:absolute;top:0;width:8%;max-width:42px;height:83px;background:#151923;border:1px solid #070a10;border-radius:0 0 5px 5px;z-index:2;transform:translateX(-50%);box-shadow:0 4px 7px #0008}
+.white.active{background:#75e0c1!important}.black.active{background:#e8b85c}
+.staff-wrap{overflow-x:auto}.staff{display:block;width:100%;min-width:620px;height:250px;background:#f8f7f2;border-radius:12px}
+.notes{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.chip{background:#293951;border:1px solid #47617e;border-radius:999px;padding:7px 12px;font-weight:700}
+.big{font-size:1.4rem;font-weight:800;color:var(--accent);min-height:34px}
+small{color:var(--muted)}.hint{font-size:13px}
+</style>
+</head>
+<body><main>
+<h1>🎹 Piano detector</h1>
+<p>Un piano visual que escucha el sonido por el micrófono: no se toca desde la pantalla. Intenta reconocer notas y acordes, las ilumina en el teclado y las dibuja en el pentagrama.</p>
+<section class="panel">
+ <div class="controls">
+  <button id="start">🎙️ Activar micrófono</button>
+  <button id="stop" class="secondary" disabled>Detener escucha</button>
+  <button id="clear" class="secondary">Borrar notas del pentagrama</button>
+ </div>
+ <div id="status" class="status">Micrófono apagado. Pulsa “Activar micrófono” y concede permiso.</div>
+ <div class="big" id="detected">Esperando sonido…</div>
+ <small>La detección de acordes es aproximada: funciona mejor con un piano claro, poco ruido y notas no demasiado graves.</small>
+</section>
+<section class="panel">
+ <h2>Teclado detectado</h2>
+ <div class="piano" id="piano"></div>
+ <div class="hint">Las teclas se iluminan según las frecuencias detectadas. El teclado es solo visual.</div>
+</section>
+<section class="panel">
+ <h2>Notas en el pentagrama</h2>
+ <div class="staff-wrap"><canvas id="staff" class="staff" width="900" height="250"></canvas></div>
+ <div id="noteList" class="notes"></div>
+ <p class="hint">Se muestran dos pentagramas: clave de sol (arriba) y clave de fa (abajo). El botón de borrar limpia el historial escrito, pero no detiene la escucha.</p>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ctx=null, analyser=null, stream=null, raf=0, lastUpdate=0, history=[], activeMidi=[];
+const names=['Do','Do♯','Re','Re♯','Mi','Fa','Fa♯','Sol','Sol♯','La','La♯','Si'];
+const piano=$('piano');
+const whiteMidis=[48,50,52,53,55,57,59,60,62,64,65,67,69,71,72];
+const blackAfter=[1,3,6,8,10,13,15,18,20,22];
+whiteMidis.forEach((m,i)=>{let k=document.createElement('div');k.className='white';k.dataset.midi=m;k.innerHTML='<span>'+names[m%12]+'</span>';piano.append(k)});
+const blackPositions=[1,2,4,5,6,8,9,11,12,13];
+blackPositions.forEach((p,i)=>{let k=document.createElement('div');k.className='black';k.dataset.midi=whiteMidis[0]+p;k.style.left=(100*(i+1)/15)+'%';piano.append(k)});
+function midiName(m){return names[m%12]+' '+(Math.floor(m/12)-1)}
+function freqMidi(f){return Math.round(69+12*Math.log2(f/440))}
+function drawStaff(){
+ const c=$('staff'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.fillStyle='#f8f7f2';g.fillRect(0,0,c.width,c.height);
+ g.strokeStyle='#333';g.lineWidth=1.5;
+ const top=58, bottom=168, gap=10;
+ for(let s=0;s<2;s++){let y=s?bottom:top;for(let i=0;i<5;i++){g.beginPath();g.moveTo(35,y+i*gap);g.lineTo(870,y+i*gap);g.stroke()}}
+ g.fillStyle='#202938';g.font='bold 48px serif';g.fillText('𝄞',42,105);g.fillText('𝄢',42,215);
+ g.font='13px system-ui';g.fillText('Clave de sol',105,35);g.fillText('Clave de fa',105,145);
+ // treble staff bottom line E4; bass staff bottom line G2
+ const seen=new Set();
+ history.slice(-38).forEach((m,i)=>{if(seen.has(m))return;seen.add(m);
+   let x=145+(i%19)*38, staffTop=m>=60?top:bottom, baseMidi=m>=60?64:43;
+   let steps=m-baseMidi;let y=staffTop+40-steps*5;
+   // map low notes into bass range, high notes into treble
+   if(m>=60){y=top+40-(m-64)*5}else{y=bottom+40-(m-43)*5}
+   g.fillStyle='#172235';g.beginPath();g.ellipse(x,y,7,4.5,-.15,0,Math.PI*2);g.fill();
+   g.strokeStyle='#172235';g.lineWidth=1.3;g.beginPath();g.moveTo(x+6,y);g.lineTo(x+6,y-28);g.stroke();
+   g.font='10px system-ui';g.fillStyle='#33445d';g.fillText(midiName(m),x-13,230);
+ });
+}
+function buildPeaks(){
+ const n=analyser.frequencyBinCount, data=new Uint8Array(n);analyser.getByteFrequencyData(data);
+ const sr=ctx.sampleRate, size=analyser.fftSize, peaks=[];
+ // Local spectral maxima in the useful piano range, then keep strongest distinct notes.
+ for(let i=2;i<n-2;i++){
+  let f=i*sr/size;if(f<75||f>1800)continue;
+  if(data[i]>data[i-1]&&data[i]>=data[i+1]&&data[i]>13){
+   let m=freqMidi(f), target=440*Math.pow(2,(m-69)/12), cents=Math.abs(1200*Math.log2(f/target));
+   if(cents<48)peaks.push({m,amp:data[i],f});
+  }
+ }
+ peaks.sort((a,b)=>b.amp-a.amp);
+ let chosen=[];
+ for(const p of peaks){if(!chosen.some(q=>q.m===p.m)&&chosen.length<6)chosen.push(p)}
+ return chosen.sort((a,b)=>a.m-b.m).map(p=>p.m);
+}
+function updateKeys(ms){document.querySelectorAll('.white,.black').forEach(k=>k.classList.toggle('active',ms.includes(+k.dataset.midi)))}
+function loop(t){
+ if(!analyser)return;
+ if(t-lastUpdate>110){
+  lastUpdate=t;let ms=buildPeaks();
+  if(ms.length){activeMidi=ms;$('detected').textContent=ms.map(midiName).join('  +  ');updateKeys(ms);
+   ms.forEach(m=>{if(!history.includes(m))history.push(m)});drawStaff();
+   $('noteList').innerHTML=ms.map(m=>'<span class="chip">'+midiName(m)+'</span>').join('');
+  }else{activeMidi=[];updateKeys([]);$('detected').textContent='Escuchando…';$('noteList').innerHTML=''}
+ }
+ raf=requestAnimationFrame(loop);
+}
+$('start').onclick=async()=>{
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  ctx=new (window.AudioContext||window.webkitAudioContext)();await ctx.resume();
+  analyser=ctx.createAnalyser();analyser.fftSize=8192;analyser.smoothingTimeConstant=.72;
+  const source=ctx.createMediaStreamSource(stream);source.connect(analyser);
+  $('status').innerHTML='<span class="live">● Micrófono activo</span> — el audio se analiza en tiempo real y no se guarda.';
+  $('start').disabled=true;$('stop').disabled=false;loop(0);
+ }catch(e){$('status').textContent='No se pudo activar el micrófono. Abre este archivo en un navegador compatible y permite el acceso al micrófono. ('+e.message+')'}
+};
+$('stop').onclick=()=>{
+ cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());if(ctx)ctx.close();
+ stream=null;ctx=null;analyser=null;$('start').disabled=false;$('stop').disabled=true;$('status').textContent='Micrófono apagado.';$('detected').textContent='Escucha detenida';updateKeys([]);
+};
+$('clear').onclick=()=>{history=[];drawStaff();$('noteList').innerHTML='';};
+drawStaff();
+</script></body></html>
